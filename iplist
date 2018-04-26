@@ -1,0 +1,452 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Net::CIDR::Lite;
+use Carp qw(confess);
+
+
+my @names = ();
+push @names, {name=>"iplist", sub=>"",
+              descr=>"Base script for set of programs for operations with networks list. Make symlinks to this script file.",
+              help=>"\n\tFor additional info call symlink programm with -h option.\n",
+};
+push @names, {name=>"iplist_diff", sub=>"IplistDiff",
+              descr=>"Show diff between two files",
+              help=>"Usage:\n\tiplist_diff [-w|-ww] file-old file-new\n".
+                    "\t-w - do WHOIS request to show NETNAME and RIPE netnum for delta.\n".
+                    "\t-ww - do WHOIS request to show NETNAME and RIPE netnum, and ASN lookup for delta.\n",
+};
+push @names, {name=>"iplist_agg",  sub=>"IplistAgg",
+              descr=>"Show aggregated iplist",
+              help=>"Usage:\n\tiplist_agg [-w] [input-file]\n".
+                    "\t-w for wide netmask output.\n".
+                    "\tIf no input-file specified then STDIN will be used.\n"
+};
+push @names, {name=>"iplist_ovpn", sub=>"IplistOpenvpn",
+              descr=>"Show aggregated iplist for OpenVPN 'push routes' CCD.",
+              help=>"Usage:\n\tiplist_ovpn [-vg|-ng] [input-file]\n".
+                    "\t-ng - generate 'push net_gateway' commands.\n".
+                    "\t-vg - generate 'push vpn_gateway' commands.\n".
+                    "\tOption '-ng' is default option, only one can be used at once.\n".
+                    "\tIf no input-file specified then STDIN will be used.\n "
+};
+push @names, {name=>"iplist_diffq", sub=>"IplistQuaggaDiff",
+              descr=>"Show iplist diff between Quagga BGP routing table data and file",
+              help=>"Usage:\n\tiplist_diffq [-w|-ww] file\n".
+                    "\t-w - do WHOIS request to show NETNAME and RIPE netnum for delta.\n".
+                    "\t-ww - do WHOIS request to show NETNAME and RIPE netnum, and ASN lookup for delta.\n",
+};
+push @names, {name=>"iplist_quagga",  sub=>"IplistQuagga",
+              descr=>"Show aggregated iplist from Quagga BGP routing table. (By calling 'vtysh -c \"show ip route\"')",
+              help=>"Usage:\n\tiplist_agg [-w]\n".
+                    "\t-w for wide netmask output.\n"
+};
+
+
+if ($0 !~ /\/iplist$/) {
+	my $var = undef;
+	foreach my $n (@names) {
+		my $name = $n->{name};
+		if ($0 =~ /\/$name$/ ) {
+			$var = $n;
+			last;
+		};
+	};
+	
+	#Show help if required
+	if ($ARGV[0] && $ARGV[0] eq "-h") {
+		print $var->{name}.": ".$var->{descr}."\n";
+		print $var->{help} if exists $var->{help};
+		exit();
+	};
+	if ($var) {
+		#Do proper call
+		my $sub = $var->{sub};
+		no strict 'refs';
+		&$sub($var);
+		exit();
+	};
+};
+
+print "Please call this programm by:\n";
+foreach my $var (@names) {
+	print "\t".$var->{name}.": ".$var->{descr}."\n";
+};
+if ($0 =~ /\/iplist$/) {
+	my $var = $names[0];
+	print $var->{help} if exists $var->{help};
+}
+else {
+	print "Call as $0 is incorrect\n" unless $0 =~ /\/iplist$/;
+}
+exit();
+
+
+sub IplistDiff {
+	my $var = shift;
+	my $f1 = $ARGV[0];
+	my $wh = 0;
+	if (!$f1) {
+		#nope
+	}
+	elsif ($f1 eq "-w") {
+		shift(@ARGV);
+		$f1 = $ARGV[0];
+		$wh = 1;
+	}
+	elsif ($f1 eq "-ww") {
+		shift(@ARGV);
+		$f1 = $ARGV[0];
+		$wh = 2;
+	}
+	elsif ($f1 =~ /^-/) {
+	    print "Invalid option $f1\n";
+	    exit;
+	}
+	my $f2 = $ARGV[1];
+	unless ($f1 && $f2) {
+		print "\t".$var->{name}.": ".$var->{descr}."\n";
+		print $var->{help} if $var->{help};
+		exit
+	};
+	if ( ! -f $f1 ) {
+		print "File not found: $f1 \n";
+		exit
+	}
+	if ( ! -f $f2 ) {
+		print "File not found: $f2 \n";
+		exit
+	}
+	my $o1 = get_file_cidrobj($f1);
+	my $o2 = get_file_cidrobj($f2);
+	
+	print_diff_whois($o1,$o2,$wh);
+};
+
+sub IplistQuaggaDiff {
+	my $var = shift;
+	my $f1 = $ARGV[0];
+	my $wh = 0;
+	if (!$f1) {
+		#nope
+	}
+	elsif ($f1 eq "-w") {
+		shift(@ARGV);
+		$f1 = $ARGV[0];
+		$wh = 1;
+	}
+	elsif ($f1 eq "-ww") {
+		shift(@ARGV);
+		$f1 = $ARGV[0];
+		$wh = 2;
+	}
+	elsif ($f1 =~ /^-/) {
+	    print "Invalid option $f1\n";
+	    exit;
+	}
+	unless ($f1) {
+		print "\t".$var->{name}.": ".$var->{descr}."\n";
+		print $var->{help} if $var->{help};
+		exit();
+	};
+	if ( ! -f $f1 ) {
+		print "File not found: $f1 \n";
+		exit
+	}
+	my $o1 = get_file_cidrobj($f1);
+	my $o2 = get_bgp_cidrobj();
+	
+	print_diff_whois($o1,$o2,$wh);
+};
+
+sub IplistAgg {
+	my $opts = $ARGV[0];
+	my $wide = 0;
+	if (!$opts) {
+	    #nope
+	}
+	elsif ($opts eq "-w") {
+	    shift(@ARGV);
+	    $wide = 1;
+	}
+	elsif ($opts =~ /^-/) {
+	    print "Invalid option $opts\n";
+	    exit;
+	}
+	
+	my $cidr = Net::CIDR::Lite->new;
+	while(<>) {
+		chomp;
+		next unless $_;
+		$cidr->add_any($_);
+	};
+	if ($wide) {
+		print_iplist_wide($cidr);
+	}
+	else {
+		print_iplist($cidr);
+	}
+};
+
+sub IplistQuagga {
+	my $opts = $ARGV[0];
+	my $wide = 0;
+	if (!$opts) {
+	    #nope
+	}
+	elsif ($opts eq "-w") {
+	    shift(@ARGV);
+	    $wide = 1;
+	}
+	elsif ($opts =~ /^-/) {
+	    print "Invalid option $opts\n";
+	    exit;
+	}
+	
+	my $cidr = get_bgp_cidrobj();
+	if ($wide) {
+		print_iplist_wide($cidr);
+	}
+	else {
+		print_iplist($cidr);
+	}
+};
+sub IplistOpenvpn {
+	my $opts = $ARGV[0];
+	my $net = 1;
+	if (!$opts) {
+	    #nope
+	}
+	elsif ($opts eq "-ng") {
+	    shift(@ARGV);
+	    $net = 1;
+	}
+	elsif ($opts eq "-vg") {
+	    shift(@ARGV);
+	    $net = 0;
+	}
+	elsif ($opts =~ /^-/) {
+	    print "Invalid option $opts\n";
+	    exit;
+	}
+	
+	my $cidr = Net::CIDR::Lite->new;
+	while(<>) {
+		chomp;
+		next unless $_;
+		$cidr->add_any($_);
+	};
+	print_iplist_ovpn($cidr,$net);
+}
+
+sub find_range {
+	my $self = shift;
+	my $range = shift;
+	my ($start,$end);
+
+	if ($range =~ /-/) {
+		#1.2.3.4-1.2.3.5
+		my ($ip_start, $ip_end, $crud) = split /\s*-\s*/,$range;
+		confess "Only one hyphen allowed in range" if defined $crud;
+
+		$start = $self->{PACK}->($ip_start)
+			or confess "Bad ip address: $ip_start";
+		$end = $self->{PACK}->($ip_end)
+			or confess "Bad ip address: $ip_end";
+		confess "Start IP is greater than end IP" if $start gt $end;
+		$end = $self->_add_bit($end, $$self{NBITS});
+	}
+	else {
+		#1.2.3.4/24 or 1.2.3.4
+		my ($ip, $mask) = split "/", $range;
+		$mask||=32;
+		confess "Bad mask $mask in $range"
+			unless $mask =~ /^\d+$/ and $mask <= $self->{NBITS}-8;
+		$mask += 8;
+		$start = $self->{PACK}->($ip) & $self->{MASKS}[$mask]
+			or confess "Bad ip address: $ip";
+		$end = $self->_add_bit($start, $mask);
+	}
+	
+	$self->prep_find unless $self->{FIND};
+	
+	my $ranges = $self->{RANGES};
+	
+	#Find start
+	my $last = -1;
+	foreach my $ip (@{$self->{FIND}}) {
+		if ($start lt $ip) {
+			return 0 if $last <= 0;
+			return 0 if $end gt $ip;
+			return 1;
+		};
+		$last = $ranges->{$ip};
+	};
+	return 0;
+};
+
+sub get_bgp_cidrobj {
+	my $cidr = Net::CIDR::Lite->new;
+
+	open(F,'vtysh -c "show ip route" |') or die $!;
+	while (<F>) {
+		if ($_ =~ /B>\* (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:\/\d{1,2})?)/) {
+			my $ip = $1;
+			next if $ip eq "0.0.0.0/0";
+			#print "->".$ip."\n";
+			$cidr->add($ip);
+		}
+	};
+	close(F);
+	return $cidr;
+}
+
+sub get_file_cidrobj {
+	my $file = shift;
+	my $cidr = Net::CIDR::Lite->new;
+	
+	open(F,"<".$file) or die $!;
+	while (<F>) {
+		$cidr->add($_);
+	};
+	close(F);
+	return $cidr;
+}
+
+sub print_iplist {
+	my $cidr = shift;
+	foreach my $ip (@{$cidr->list()}){
+		print "$ip\n";
+	};
+};
+
+sub print_iplist_wide {
+	my $cidr = shift;
+	foreach my $ip (@{$cidr->list()}){
+		$ip =~ /^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/;
+		die "Incorrect IP $ip" unless $1 && $2;
+		
+		print "$1/";
+		print join '.', unpack('C4C4C4C4', pack('B32', (('1' x $2) . ('0' x (32 - $2)))));
+		print "\n";
+	};
+};
+
+sub print_iplist_ovpn {
+	my $cidr = shift;
+	my $netgw = shift || 0;
+	if ($netgw) {
+		$netgw = " net_gateway\"\n";
+	}
+	else {
+		$netgw = " vpn_gateway\"\n";
+	};
+	foreach my $ip (@{$cidr->list()}){
+		$ip =~ /^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/;
+		die "Incorrect IP $ip" unless $1 && $2;
+		
+		print "push \"route $1 ";
+		print join '.', unpack('C4C4C4C4', pack('B32', (('1' x $2) . ('0' x (32 - $2)))));
+		print $netgw;
+	};
+};
+
+sub print_diff_whois {
+	my $fcidr = shift;
+	my $bcidr = shift;
+	my $wh    = shift;
+	
+	if ($wh > 0) {
+		eval "use Net::Whois::Raw; use Net::XWhois;";
+		if ($!) {
+			print "You need to install Net::Whois::Raw and Net::XWhois perl modules to use this option.\n";
+			exit();
+		};
+	};
+	my $h = {};
+	$h->{mode}=$wh;
+
+	my $query = "";
+	my @remove = ();
+	foreach my $ip (@{$fcidr->list()}){
+		unless (find_range($bcidr,$ip)) {
+			#print "- $ip\n";
+			push @remove,$ip;
+			$query .= " -v -f $ip\n";
+		};
+	};
+	my @new = ();
+	foreach my $ip (@{$bcidr->list()}){
+		unless (find_range($fcidr,$ip)) {
+			#print "+ $ip\n";
+			push @new,$ip;
+			$query .= " -v -f $ip\n";
+		};
+	};
+	
+	if ($wh >= 1) {
+		foreach my $prefix (@new,@remove) {
+			my @col = ();
+			my $whois = new Net::XWhois Domain => $prefix;
+			$col[0]=$whois->netname;
+			my $cidr = Net::CIDR::Lite->new();
+			$cidr->add_range($whois->inetnum);
+			$cidr->prep_find unless $cidr->{FIND};
+			$col[1]=join(",",$cidr->list());
+			
+			my $ip = $prefix;
+			$ip =~ s/\/\d{1,3}//;
+			$$h{$ip}=\@col;
+		};
+	};
+	
+	if ($wh >= 2) {
+		# Request for prefix visibility in world-wide BGP
+		my $server = "whois.cymru.com";
+		my $result = "";
+		$result = Net::Whois::Raw::whois($query, $server) if $query;
+		foreach my $str (split /\n/,$result) {
+			my @col = split /\|/, $str;
+			print "WARNING: $str no matches as expected\n" if scalar @col != 7 ;
+			
+			#print "O=".$str."\n";
+			#print @col[0],@col[1],@col[2],@col[3],@col[4],@col[5],@col[6],"\n";
+			my $ip = $col[1];
+			$ip =~ s/^\s+//gi;
+			$ip =~ s/\s+$//gi;
+			
+			push @{$h->{$ip}},@col;
+		};
+	};
+
+	foreach my $prefix (@remove) {
+		_print_delta_line($prefix, "-", $h);
+	};
+
+	foreach my $prefix (@new) {
+		_print_delta_line($prefix, "+", $h);
+	};
+};
+
+sub _print_delta_line {
+	my $prefix = shift;
+	my $dir  = shift; # -/+
+	my $info = shift||{};
+	$info->{mode}=0 unless exists $info->{mode};
+	
+	print "$dir $prefix";
+	
+	my $ip = $prefix;
+	$ip =~ s/\/\d{1,3}//;
+	if ($info->{mode}==0) {
+		print "\n";
+	}
+	elsif (!exists $info->{$ip}) {
+		print "WARNING: no info for prefix $prefix\n";
+	}
+	else {
+		my @ipi = @{$info->{$ip}};
+		print "\t".$ipi[0]."\t\t".$ipi[1]."\n";
+		print "\tAS".$ipi[2]." ".$ipi[4]." ".$ipi[5]." ".$ipi[6]." ".$ipi[7]." ".$ipi[8]."\n" if $info->{mode} == 2;
+	};
+};
